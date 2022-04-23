@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[6]:
+# In[7]:
 
 
 # HOME CREDIT DEFAULT RISK COMPETITION
@@ -27,7 +27,7 @@ import gc
 import time
 from contextlib import contextmanager
 from lightgbm import LGBMClassifier
-from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import fbeta_score
 from sklearn.model_selection import KFold, StratifiedKFold
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -249,9 +249,13 @@ def credit_card_balance(num_rows = None, nan_as_category = True):
     gc.collect()
     return cc_agg
 
+def fb(x, y):
+    return fbeta_score(x, y, beta = 0.3)
+    
+
 # LightGBM GBDT with KFold or Stratified KFold
 # Parameters from Tilii kernel: https://www.kaggle.com/tilii7/olivier-lightgbm-parameters-by-bayesian-opt/code
-def kfold_lightgbm(df, num_folds, stratified = False, debug= False):
+def kfold_lightgbm(df, num_folds, beta = 1, stratified = False, debug= False):
     # Divide in training/validation and test data
     train_df = df[df['TARGET'].notnull()]
     test_df = df[df['TARGET'].isnull()]
@@ -270,7 +274,7 @@ def kfold_lightgbm(df, num_folds, stratified = False, debug= False):
         folds = KFold(n_splits= num_folds, shuffle=True, random_state=1001)
     # Create arrays and dataframes to store results
     oof_preds = np.zeros(train_df.shape[0])
-    sub_preds = np.zeros(test_df.shape[0])
+#     sub_preds = np.zeros(test_df.shape[0])
     feature_importance_df = pd.DataFrame()
     feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
     
@@ -295,24 +299,43 @@ def kfold_lightgbm(df, num_folds, stratified = False, debug= False):
             verbose=-1, )
 
         clf.fit(train_x, train_y, eval_set=[(train_x, train_y), (valid_x, valid_y)], 
-            eval_metric= 'auc', verbose= 200, early_stopping_rounds= 200)
+            eval_metric= "precision", verbose= 200, early_stopping_rounds= 200)
 
-        oof_preds[valid_idx] = clf.predict_proba(valid_x, num_iteration=clf.best_iteration_)[:, 1]
-        sub_preds += clf.predict_proba(test_df[feats], num_iteration=clf.best_iteration_)[:, 1] / folds.n_splits
+        oof_preds[valid_idx] = clf.predict(valid_x, num_iteration=clf.best_iteration_)
+#         sub_preds += clf.predict_proba(test_df[feats], num_iteration=clf.best_iteration_)[:, 1] / folds.n_splits
 
         fold_importance_df = pd.DataFrame()
         fold_importance_df["feature"] = feats
         fold_importance_df["importance"] = clf.feature_importances_
         fold_importance_df["fold"] = n_fold + 1
         feature_importance_df = pd.concat([feature_importance_df, fold_importance_df], axis=0)
-        print('Fold %2d AUC : %.6f' % (n_fold + 1, roc_auc_score(valid_y, oof_preds[valid_idx])))
+        print('Fold %2d Fbéta-score : %.6f' % (n_fold + 1, fbeta_score(valid_y, oof_preds[valid_idx], beta)))
         del clf, train_x, train_y, valid_x, valid_y
         gc.collect()
 
-    print('Full AUC score %.6f' % roc_auc_score(train_df['TARGET'], oof_preds))
+    print('Full Fbéta-score %.6f' % fbeta_score(train_df['TARGET'], oof_preds, beta))
     # Write submission file and plot feature importance
     if not debug:
-        test_df['TARGET'] = sub_preds
+        clf = LGBMClassifier(
+            nthread=4,
+            n_estimators=10000,
+            learning_rate=0.02,
+            num_leaves=34,
+            colsample_bytree=0.9497036,
+            subsample=0.8715623,
+            max_depth=8,
+            reg_alpha=0.041545473,
+            reg_lambda=0.0735294,
+            min_split_gain=0.0222415,
+            min_child_weight=39.3259775,
+            silent=-1,
+            verbose=-1, )
+        
+        clf.fit(train_df[feats], train_df["TARGET"], 
+                eval_set=[(train_df[feats], train_df["TARGET"])], 
+                eval_metric= "precision", verbose= 200, early_stopping_rounds= 200)
+        
+        test_df['TARGET'] = clf.predict(test_df[feats], num_iteration=clf.best_iteration_)
         test_df[['SK_ID_CURR', 'TARGET']].to_csv(submission_file_name, index= False)
     display_importances(feature_importance_df)
     return feature_importance_df
@@ -362,10 +385,11 @@ def main(debug = False):
         del cc
         gc.collect()
     with timer("Run LightGBM with kfold"):
-        feat_importance = kfold_lightgbm(df, num_folds= 10, stratified= False, debug= debug)
+        #Beta à 0.3 privilégie la précision des positifs (donc limite les faux positifs)
+        feat_importance = kfold_lightgbm(df, num_folds= 5, beta = 0.3, stratified= False, debug= debug)
 
 if __name__ == "__main__":
-    submission_file_name = "submission_kernel02.csv"
+    submission_file_name = "submission_kernel_fbeta.csv"
     with timer("Full model run"):
         main()
 
