@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[7]:
+# In[1]:
 
 
 # HOME CREDIT DEFAULT RISK COMPETITION
@@ -27,12 +27,17 @@ import gc
 import time
 from contextlib import contextmanager
 from lightgbm import LGBMClassifier
-from sklearn.metrics import fbeta_score
+
+
 from sklearn.model_selection import KFold, StratifiedKFold
+from imblearn.pipeline import Pipeline
+from imblearn.over_sampling import SMOTE
+from imblearn.under_sampling import RandomUnderSampler
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
 import re
+
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 @contextmanager
@@ -255,7 +260,7 @@ def fb(x, y):
 
 # LightGBM GBDT with KFold or Stratified KFold
 # Parameters from Tilii kernel: https://www.kaggle.com/tilii7/olivier-lightgbm-parameters-by-bayesian-opt/code
-def kfold_lightgbm(df, num_folds, beta = 1, stratified = False, debug= False):
+def kfold_lightgbm(df, num_folds, beta = 1, debug= False, cv_calc = True):
     # Divide in training/validation and test data
     train_df = df[df['TARGET'].notnull()]
     test_df = df[df['TARGET'].isnull()]
@@ -265,55 +270,68 @@ def kfold_lightgbm(df, num_folds, beta = 1, stratified = False, debug= False):
     # Correction problème caractères avec LightGBM
     train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
     test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+    train_df = train_df.reset_index()
+    test_df = test_df.reset_index()
     
     gc.collect()
     # Cross validation model
-    if stratified:
-        folds = StratifiedKFold(n_splits= num_folds, shuffle=True, random_state=1001)
-    else:
+    if cv_calc:
         folds = KFold(n_splits= num_folds, shuffle=True, random_state=1001)
-    # Create arrays and dataframes to store results
-    oof_preds = np.zeros(train_df.shape[0])
-#     sub_preds = np.zeros(test_df.shape[0])
-    feature_importance_df = pd.DataFrame()
-    feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
-    
-    for n_fold, (train_idx, valid_idx) in enumerate(folds.split(train_df[feats], train_df['TARGET'])):
-        train_x, train_y = train_df[feats].iloc[train_idx], train_df['TARGET'].iloc[train_idx]
-        valid_x, valid_y = train_df[feats].iloc[valid_idx], train_df['TARGET'].iloc[valid_idx]
+        # Create arrays and dataframes to store results
+        oof_preds = np.zeros(train_df.shape[0])
+    #     sub_preds = np.zeros(test_df.shape[0])
+        feature_importance_df = pd.DataFrame()
+        feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
+        
+        train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        train_df.fillna(0, inplace=True)
+        
 
-        # LightGBM parameters found by Bayesian optimization
-        clf = LGBMClassifier(
-            nthread=4,
-            n_estimators=10000,
-            learning_rate=0.02,
-            num_leaves=34,
-            colsample_bytree=0.9497036,
-            subsample=0.8715623,
-            max_depth=8,
-            reg_alpha=0.041545473,
-            reg_lambda=0.0735294,
-            min_split_gain=0.0222415,
-            min_child_weight=39.3259775,
-            silent=-1,
-            verbose=-1, )
+        for n_fold, (train_idx, valid_idx) in enumerate(folds.split(train_df[feats], train_df['TARGET'])):
+            train_x, train_y = train_df[feats].iloc[train_idx], train_df['TARGET'].iloc[train_idx]
+            valid_x, valid_y = train_df[feats].iloc[valid_idx], train_df['TARGET'].iloc[valid_idx]
 
-        clf.fit(train_x, train_y, eval_set=[(train_x, train_y), (valid_x, valid_y)], 
-            eval_metric= "precision", verbose= 200, early_stopping_rounds= 200)
+            # LightGBM parameters found by Bayesian optimization
+            over = SMOTE(sampling_strategy=0.2)
+            under = RandomUnderSampler(sampling_strategy = 0.5)
+            clf = LGBMClassifier(
+                nthread=4,
+                n_estimators=10000,
+                learning_rate=0.02,
+                num_leaves=34,
+                colsample_bytree=0.9497036,
+                subsample=0.8715623,
+                max_depth=8,
+                reg_alpha=0.041545473,
+                reg_lambda=0.0735294,
+                min_split_gain=0.0222415,
+                min_child_weight=39.3259775,
+                silent=-1,
+                verbose=-1, )
 
-        oof_preds[valid_idx] = clf.predict(valid_x, num_iteration=clf.best_iteration_)
-#         sub_preds += clf.predict_proba(test_df[feats], num_iteration=clf.best_iteration_)[:, 1] / folds.n_splits
+            steps = [("over", over), ("under", under), ("model", clf)]
+            pipeline = Pipeline(steps=steps)
+            print(np.any(np.isnan(train_df)))
+            print(np.all(np.isfinite(train_df)))
+            print(np.any(np.isnan(test_df)))
+            print(np.all(np.isfinite(test_df)))
+#             print("Debut du fit %2d" % n_fold+1)
+            pipeline.fit(train_x, train_y, model__eval_set=[(train_x, train_y), (valid_x, valid_y)], 
+                model__eval_metric= "auc", model__verbose= 200, model__early_stopping_rounds= 200)
 
-        fold_importance_df = pd.DataFrame()
-        fold_importance_df["feature"] = feats
-        fold_importance_df["importance"] = clf.feature_importances_
-        fold_importance_df["fold"] = n_fold + 1
-        feature_importance_df = pd.concat([feature_importance_df, fold_importance_df], axis=0)
-        print('Fold %2d Fbéta-score : %.6f' % (n_fold + 1, fbeta_score(valid_y, oof_preds[valid_idx], beta)))
-        del clf, train_x, train_y, valid_x, valid_y
-        gc.collect()
+            oof_preds[valid_idx] = pipeline.predict(valid_x, num_iteration=clf.best_iteration_)
+    #         sub_preds += clf.predict_proba(test_df[feats], num_iteration=clf.best_iteration_)[:, 1] / folds.n_splits
 
-    print('Full Fbéta-score %.6f' % fbeta_score(train_df['TARGET'], oof_preds, beta))
+            fold_importance_df = pd.DataFrame()
+            fold_importance_df["feature"] = feats
+            fold_importance_df["importance"] = clf.feature_importances_
+            fold_importance_df["fold"] = n_fold + 1
+            feature_importance_df = pd.concat([feature_importance_df, fold_importance_df], axis=0)
+            print('Fold %2d Fbéta-score : %.6f' % (n_fold + 1, fbeta_score(valid_y, oof_preds[valid_idx], beta=beta)))
+            del clf, train_x, train_y, valid_x, valid_y
+            gc.collect()
+
+    print('Full Fbéta-score %.6f' % fbeta_score(train_df['TARGET'], oof_preds, beta=beta))
     # Write submission file and plot feature importance
     if not debug:
         clf = LGBMClassifier(
@@ -331,11 +349,17 @@ def kfold_lightgbm(df, num_folds, beta = 1, stratified = False, debug= False):
             silent=-1,
             verbose=-1, )
         
-        clf.fit(train_df[feats], train_df["TARGET"], 
-                eval_set=[(train_df[feats], train_df["TARGET"])], 
-                eval_metric= "precision", verbose= 200, early_stopping_rounds= 200)
+        over = SMOTE(sampling_strategy=0.2)
+        under = RandomUnderSampler(sampling_strategy = 0.5)
+        steps = [("over", over), ("under", under), ("model", clf)]
+        pipeline = Pipeline(steps=steps)
         
-        test_df['TARGET'] = clf.predict(test_df[feats], num_iteration=clf.best_iteration_)
+        pipeline.fit(train_df[feats], train_df["TARGET"], 
+                model__eval_set=[(train_df[feats], train_df["TARGET"])], 
+                model__eval_metric= "auc", model__verbose= 200, 
+                model__early_stopping_rounds= 200)
+        
+        test_df['TARGET'] = pipeline.predict(test_df[feats], num_iteration=clf.best_iteration_)
         test_df[['SK_ID_CURR', 'TARGET']].to_csv(submission_file_name, index= False)
     display_importances(feature_importance_df)
     return feature_importance_df
@@ -385,11 +409,11 @@ def main(debug = False):
         del cc
         gc.collect()
     with timer("Run LightGBM with kfold"):
-        #Beta à 0.3 privilégie la précision des positifs (donc limite les faux positifs)
-        feat_importance = kfold_lightgbm(df, num_folds= 5, beta = 0.3, stratified= False, debug= debug)
+        # Beta à 0.3 privilégie la précision des positifs (donc limite les faux positifs)
+        feat_importance = kfold_lightgbm(df, num_folds= 5, beta = 0.3, debug= debug)
 
 if __name__ == "__main__":
-    submission_file_name = "submission_kernel_fbeta.csv"
+    submission_file_name = "submission_kernel_overunder.csv"
     with timer("Full model run"):
         main()
 
