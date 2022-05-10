@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# # Tests
+
+# In[55]:
 
 
 # HOME CREDIT DEFAULT RISK COMPETITION
@@ -29,10 +31,15 @@ from contextlib import contextmanager
 from lightgbm import LGBMClassifier
 
 
-from sklearn.model_selection import KFold, StratifiedKFold
+from sklearn.model_selection import KFold, GridSearchCV 
+from sklearn.metrics import precision_recall_curve
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
 from imblearn.pipeline import Pipeline
 from imblearn.over_sampling import SMOTE
 from imblearn.under_sampling import RandomUnderSampler
+import shap
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
@@ -253,117 +260,7 @@ def credit_card_balance(num_rows = None, nan_as_category = True):
     del cc
     gc.collect()
     return cc_agg
-
-def fb(x, y):
-    return fbeta_score(x, y, beta = 0.3)
     
-
-# LightGBM GBDT with KFold or Stratified KFold
-# Parameters from Tilii kernel: https://www.kaggle.com/tilii7/olivier-lightgbm-parameters-by-bayesian-opt/code
-def kfold_lightgbm(df, num_folds, beta = 1, debug= False, cv_calc = True):
-    # Divide in training/validation and test data
-    train_df = df[df['TARGET'].notnull()]
-    test_df = df[df['TARGET'].isnull()]
-    print("Starting LightGBM. Train shape: {}, test shape: {}".format(train_df.shape, test_df.shape))
-    del df
-    
-    # Correction problème caractères avec LightGBM
-    train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-    test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-    train_df = train_df.reset_index()
-    test_df = test_df.reset_index()
-    
-    gc.collect()
-    # Cross validation model
-    if cv_calc:
-        folds = KFold(n_splits= num_folds, shuffle=True, random_state=1001)
-        # Create arrays and dataframes to store results
-        oof_preds = np.zeros(train_df.shape[0])
-    #     sub_preds = np.zeros(test_df.shape[0])
-        feature_importance_df = pd.DataFrame()
-        feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
-        
-        train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        train_df.fillna(0, inplace=True)
-        
-
-        for n_fold, (train_idx, valid_idx) in enumerate(folds.split(train_df[feats], train_df['TARGET'])):
-            train_x, train_y = train_df[feats].iloc[train_idx], train_df['TARGET'].iloc[train_idx]
-            valid_x, valid_y = train_df[feats].iloc[valid_idx], train_df['TARGET'].iloc[valid_idx]
-
-            # LightGBM parameters found by Bayesian optimization
-            over = SMOTE(sampling_strategy=0.2)
-            under = RandomUnderSampler(sampling_strategy = 0.5)
-            clf = LGBMClassifier(
-                nthread=4,
-                n_estimators=10000,
-                learning_rate=0.02,
-                num_leaves=34,
-                colsample_bytree=0.9497036,
-                subsample=0.8715623,
-                max_depth=8,
-                reg_alpha=0.041545473,
-                reg_lambda=0.0735294,
-                min_split_gain=0.0222415,
-                min_child_weight=39.3259775,
-                silent=-1,
-                verbose=-1, )
-
-            steps = [("over", over), ("under", under), ("model", clf)]
-            pipeline = Pipeline(steps=steps)
-            print(np.any(np.isnan(train_df)))
-            print(np.all(np.isfinite(train_df)))
-            print(np.any(np.isnan(test_df)))
-            print(np.all(np.isfinite(test_df)))
-#             print("Debut du fit %2d" % n_fold+1)
-            pipeline.fit(train_x, train_y, model__eval_set=[(train_x, train_y), (valid_x, valid_y)], 
-                model__eval_metric= "auc", model__verbose= 200, model__early_stopping_rounds= 200)
-
-            oof_preds[valid_idx] = pipeline.predict(valid_x, num_iteration=clf.best_iteration_)
-    #         sub_preds += clf.predict_proba(test_df[feats], num_iteration=clf.best_iteration_)[:, 1] / folds.n_splits
-
-            fold_importance_df = pd.DataFrame()
-            fold_importance_df["feature"] = feats
-            fold_importance_df["importance"] = clf.feature_importances_
-            fold_importance_df["fold"] = n_fold + 1
-            feature_importance_df = pd.concat([feature_importance_df, fold_importance_df], axis=0)
-            print('Fold %2d Fbéta-score : %.6f' % (n_fold + 1, fbeta_score(valid_y, oof_preds[valid_idx], beta=beta)))
-            del clf, train_x, train_y, valid_x, valid_y
-            gc.collect()
-
-    print('Full Fbéta-score %.6f' % fbeta_score(train_df['TARGET'], oof_preds, beta=beta))
-    # Write submission file and plot feature importance
-    if not debug:
-        clf = LGBMClassifier(
-            nthread=4,
-            n_estimators=10000,
-            learning_rate=0.02,
-            num_leaves=34,
-            colsample_bytree=0.9497036,
-            subsample=0.8715623,
-            max_depth=8,
-            reg_alpha=0.041545473,
-            reg_lambda=0.0735294,
-            min_split_gain=0.0222415,
-            min_child_weight=39.3259775,
-            silent=-1,
-            verbose=-1, )
-        
-        over = SMOTE(sampling_strategy=0.2)
-        under = RandomUnderSampler(sampling_strategy = 0.5)
-        steps = [("over", over), ("under", under), ("model", clf)]
-        pipeline = Pipeline(steps=steps)
-        
-        pipeline.fit(train_df[feats], train_df["TARGET"], 
-                model__eval_set=[(train_df[feats], train_df["TARGET"])], 
-                model__eval_metric= "auc", model__verbose= 200, 
-                model__early_stopping_rounds= 200)
-        
-        test_df['TARGET'] = pipeline.predict(test_df[feats], num_iteration=clf.best_iteration_)
-        test_df[['SK_ID_CURR', 'TARGET']].to_csv(submission_file_name, index= False)
-    display_importances(feature_importance_df)
-    return feature_importance_df
-
 # Display/plot feature importance
 def display_importances(feature_importance_df_):
     cols = feature_importance_df_[["feature", "importance"]].groupby("feature").mean().sort_values(by="importance", ascending=False)[:40].index
@@ -375,45 +272,586 @@ def display_importances(feature_importance_df_):
     plt.savefig('lgbm_importances01.png')
 
 
-def main(debug = False):
-    num_rows = 10000 if debug else None
-    df = application_train_test(num_rows)
-    with timer("Process bureau and bureau_balance"):
-        bureau = bureau_and_balance(num_rows)
-        print("Bureau df shape:", bureau.shape)
-        df = df.join(bureau, how='left', on='SK_ID_CURR')
-        del bureau
-        gc.collect()
-    with timer("Process previous_applications"):
-        prev = previous_applications(num_rows)
-        print("Previous applications df shape:", prev.shape)
-        df = df.join(prev, how='left', on='SK_ID_CURR')
-        del prev
-        gc.collect()
-    with timer("Process POS-CASH balance"):
-        pos = pos_cash(num_rows)
-        print("Pos-cash balance df shape:", pos.shape)
-        df = df.join(pos, how='left', on='SK_ID_CURR')
-        del pos
-        gc.collect()
-    with timer("Process installments payments"):
-        ins = installments_payments(num_rows)
-        print("Installments payments df shape:", ins.shape)
-        df = df.join(ins, how='left', on='SK_ID_CURR')
-        del ins
-        gc.collect()
-    with timer("Process credit card balance"):
-        cc = credit_card_balance(num_rows)
-        print("Credit card balance df shape:", cc.shape)
-        df = df.join(cc, how='left', on='SK_ID_CURR')
-        del cc
-        gc.collect()
-    with timer("Run LightGBM with kfold"):
-        # Beta à 0.3 privilégie la précision des positifs (donc limite les faux positifs)
-        feat_importance = kfold_lightgbm(df, num_folds= 5, beta = 0.3, debug= debug)
+# In[2]:
 
-if __name__ == "__main__":
-    submission_file_name = "submission_kernel_overunder.csv"
-    with timer("Full model run"):
-        main()
+
+def fbscore (X, y, beta = 1):
+    
+    pre, rec, thresh = precision_recall_curve(X, y)
+    pre = pre[:-1]
+    rec = rec[:-1]
+    
+    b2 = beta**2
+    temp = pd.DataFrame(pre, columns=["pre"])
+    temp["rec"] = rec
+    temp["fb"] = ((1 + b2)*(temp["pre"] * temp["rec"]))/(b2 * temp["pre"] + temp["rec"])
+    temp["fb"].fillna(0, inplace=True)
+    fb = temp["fb"].to_numpy()
+    
+    return fb, thresh
+
+def classifier (target, fbtab, thresh):
+    lim = thresh[np.argmax(fbtab)]
+    tab_class = (target > lim).astype(int)
+    return tab_class
+
+
+# In[3]:
+
+
+def best_params(gs):
+    dic = gs.best_params_
+    a = list(dic.keys())
+    temp = pd.Series(list(dic.keys()))
+    b = temp.str.split("__").str[1].to_numpy()
+    for i in range(len(a)):
+        dic[b[i]] = dic.pop(a[i])
+    return dic
+
+
+# In[4]:
+
+
+def lightgbm(train_df, test_df, num_folds, beta = 1, grid_search = True):
+    
+    feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
+
+    train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    train_df.fillna(0, inplace=True)
+    train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+    test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+
+    print("Starting LightGBM. Train shape: {}, test shape: {}".format(train_df.shape, test_df.shape))
+    
+    if grid_search :
+        over = SMOTE(sampling_strategy=0.2)
+        under = RandomUnderSampler(sampling_strategy = 0.5)
+        clf = LGBMClassifier()
+        steps = [("over", over), ("under", under), ("model", clf)]
+        LGBM_pipe = Pipeline(steps=steps)
+
+        params = [{"model__n_estimators" : [100, 1000, 10000],
+                  "model__learning_rate" : [0.001, 0.01, 0.1], 
+                  "model__num_leaves" : [20, 30, 40]}]
+
+        gs_LGBM = GridSearchCV(LGBM_pipe,
+                              param_grid = params,
+                               scoring = "roc_auc",
+                               cv=5)
+
+        gs_LGBM.fit(train_df[feats], train_df['TARGET'])
+        params = best_params(gs_LGBM)
+        print(params)
+    else :
+        params = {'learning_rate': 0.01, 'n_estimators': 1000, 'num_leaves': 20}
+    # Divide in training/validation and test data
+
+    folds = KFold(n_splits= num_folds, shuffle=True, random_state=1001) #Nbr folds à modifier
+    # Create arrays and dataframes to store results
+    oof_preds = np.zeros(train_df.shape[0])
+    sub_preds = np.zeros(test_df.shape[0])
+    feature_importance_df = pd.DataFrame()
+
+
+
+    for n_fold, (train_idx, valid_idx) in enumerate(folds.split(train_df[feats], train_df['TARGET'])):
+        train_x, train_y = train_df[feats].iloc[train_idx], train_df['TARGET'].iloc[train_idx]
+        valid_x, valid_y = train_df[feats].iloc[valid_idx], train_df['TARGET'].iloc[valid_idx]
+
+        # LightGBM parameters found by Bayesian optimization
+        over = SMOTE(sampling_strategy=0.2)
+        under = RandomUnderSampler(sampling_strategy = 0.5)
+        clf = LGBMClassifier(**params)
+
+        steps = [("over", over), ("under", under), ("model", clf)]
+        pipeline = Pipeline(steps=steps)
+    #     print(np.any(np.isnan(train_df)))
+    #     print(np.all(np.isfinite(train_df)))
+    #     print(np.any(np.isnan(test_df)))
+    #     print(np.all(np.isfinite(test_df)))
+        pipeline.fit(train_x, train_y, model__eval_set=[(train_x, train_y), (valid_x, valid_y)], 
+            model__eval_metric= "auc", model__verbose= 200, model__early_stopping_rounds= 200)
+
+        oof_preds[valid_idx] = pipeline.predict_proba(valid_x, num_iteration=clf.best_iteration_)[:, 1]
+        sub_preds += pipeline.predict_proba(test_df[feats], num_iteration=clf.best_iteration_)[:, 1] / folds.n_splits
+        
+
+
+        fold_importance_df = pd.DataFrame()
+        fold_importance_df["feature"] = feats
+        fold_importance_df["importance"] = clf.feature_importances_
+        fold_importance_df["fold"] = n_fold + 1
+        feature_importance_df = pd.concat([feature_importance_df, fold_importance_df], axis=0)
+        
+
+        
+        del clf, train_x, train_y, valid_x, valid_y
+        
+    fb_lgbm, thresh = fbscore(train_df["TARGET"], oof_preds, beta)
+    print ("F-{} score max : {}".format(beta, np.max(fb_lgbm)))
+    test_df["TARGET LGBM"] = classifier(sub_preds, fb_lgbm, thresh)
+    test_df["TARGET LGBM score"] = sub_preds
+   
+    return feature_importance_df, test_df, np.max(fb_lgbm), oof_preds
+
+
+# In[5]:
+
+
+def RF_classifier(train_df, test_df, num_folds, beta = 1, grid_search = True):
+    
+    feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
+
+    train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    train_df.fillna(0, inplace=True)
+    train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+    test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+    
+    temp_test = test_df[feats].copy()
+    temp_test.fillna(0, inplace=True)
+
+    print("Starting Random Forest. Train shape: {}, test shape: {}".format(train_df.shape, test_df.shape))
+    
+    if grid_search :
+        over = SMOTE(sampling_strategy=0.2)
+        under = RandomUnderSampler(sampling_strategy = 0.5)
+        clf = RandomForestClassifier()
+        steps = [("over", over), ("under", under), ("model", clf)]
+        RF_pipe = Pipeline(steps=steps)
+
+        params = [{"model__n_estimators" : [10, 100, 1000],
+                  "model__max_features" : ["sqrt", "log2"], 
+                  "model__n_jobs" : [6]}]
+
+        gs_RF = GridSearchCV(RF_pipe,
+                              param_grid = params,
+                               scoring = "roc_auc",
+                               cv=5)
+
+        gs_RF.fit(train_df[feats], train_df['TARGET'])
+        params = best_params(gs_RF)
+        print(params)
+    else :
+        params = {'max_features': 'sqrt', 'n_estimators': 1000, 'n_jobs': 6}
+    # Divide in training/validation and test data
+
+    folds = KFold(n_splits= num_folds, shuffle=True, random_state=1001) #Nbr folds à modifier
+    # Create arrays and dataframes to store results
+    oof_preds = np.zeros(train_df.shape[0])
+    sub_preds = np.zeros(test_df.shape[0])
+    feature_importance_df = pd.DataFrame()
+
+
+
+    for n_fold, (train_idx, valid_idx) in enumerate(folds.split(train_df[feats], train_df['TARGET'])):
+        train_x, train_y = train_df[feats].iloc[train_idx], train_df['TARGET'].iloc[train_idx]
+        valid_x, valid_y = train_df[feats].iloc[valid_idx], train_df['TARGET'].iloc[valid_idx]
+
+        # LightGBM parameters found by Bayesian optimization
+        over = SMOTE(sampling_strategy=0.2)
+        under = RandomUnderSampler(sampling_strategy = 0.5)
+        clf = RandomForestClassifier(**params)
+
+        steps = [("over", over), ("under", under), ("model", clf)]
+        pipeline = Pipeline(steps=steps)
+    #     print(np.any(np.isnan(train_df)))
+    #     print(np.all(np.isfinite(train_df)))
+    #     print(np.any(np.isnan(test_df)))
+    #     print(np.all(np.isfinite(test_df)))
+        pipeline.fit(train_x, train_y)
+
+        oof_preds[valid_idx] = pipeline.predict_proba(valid_x)[:, 1]
+        sub_preds += pipeline.predict_proba(temp_test)[:, 1] / folds.n_splits
+        
+
+
+        fold_importance_df = pd.DataFrame()
+        fold_importance_df["feature"] = feats
+        fold_importance_df["importance"] = clf.feature_importances_
+        fold_importance_df["fold"] = n_fold + 1
+        feature_importance_df = pd.concat([feature_importance_df, fold_importance_df], axis=0)
+        
+
+        
+        del clf, train_x, train_y, valid_x, valid_y
+        
+    fb_lgbm, thresh = fbscore(train_df["TARGET"], oof_preds, beta)
+    print ("F-{} score max : {}".format(beta, np.max(fb_lgbm)))
+    test_df["TARGET RF"] = classifier(sub_preds, fb_lgbm, thresh)
+   
+    return feature_importance_df, test_df, np.max(fb_lgbm)
+
+
+# In[6]:
+
+
+def KNN(train_df, test_df, num_folds, beta = 1, grid_search = True):
+    
+    feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
+
+    train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    train_df.fillna(0, inplace=True)
+    train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+    test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+    
+    temp_test = test_df[feats].copy()
+    temp_test.fillna(0, inplace=True)
+
+    print("Starting KNN. Train shape: {}, test shape: {}".format(train_df.shape, test_df.shape))
+    
+    if grid_search :
+        over = SMOTE(sampling_strategy=0.2)
+        under = RandomUnderSampler(sampling_strategy = 0.5)
+        clf = KNeighborsClassifier()
+        steps = [("over", over), ("under", under), ("model", clf)]
+        RF_pipe = Pipeline(steps=steps)
+
+        params = [{"model__n_neighbors" : [4, 5, 6, 7, 8, 9],
+                  "model__algorithm" : ["ball_tree", "kd_tree"], 
+                  "model__n_jobs" : [6]}]
+
+        gs_RF = GridSearchCV(RF_pipe,
+                              param_grid = params,
+                               scoring = "roc_auc",
+                               cv=5)
+
+        gs_RF.fit(train_df[feats], train_df['TARGET'])
+        params = best_params(gs_RF)
+        print(params)
+    else :
+        params = {'algorithm': 'kd_tree', 'n_jobs': 6, 'n_neighbors': 9}
+    # Divide in training/validation and test data
+
+    folds = KFold(n_splits= num_folds, shuffle=True, random_state=1001) #Nbr folds à modifier
+    # Create arrays and dataframes to store results
+    oof_preds = np.zeros(train_df.shape[0])
+    sub_preds = np.zeros(test_df.shape[0])
+    feature_importance_df = pd.DataFrame()
+
+
+
+    for n_fold, (train_idx, valid_idx) in enumerate(folds.split(train_df[feats], train_df['TARGET'])):
+        train_x, train_y = train_df[feats].iloc[train_idx], train_df['TARGET'].iloc[train_idx]
+        valid_x, valid_y = train_df[feats].iloc[valid_idx], train_df['TARGET'].iloc[valid_idx]
+
+        # LightGBM parameters found by Bayesian optimization
+        over = SMOTE(sampling_strategy=0.2)
+        under = RandomUnderSampler(sampling_strategy = 0.5)
+        clf = KNeighborsClassifier(**params)
+
+        steps = [("over", over), ("under", under), ("model", clf)]
+        pipeline = Pipeline(steps=steps)
+    #     print(np.any(np.isnan(train_df)))
+    #     print(np.all(np.isfinite(train_df)))
+    #     print(np.any(np.isnan(test_df)))
+    #     print(np.all(np.isfinite(test_df)))
+        pipeline.fit(train_x, train_y)
+
+        oof_preds[valid_idx] = pipeline.predict_proba(valid_x)[:, 1]
+        sub_preds += pipeline.predict_proba(temp_test)[:, 1] / folds.n_splits      
+
+        
+        del clf, train_x, train_y, valid_x, valid_y
+        
+    fb_lgbm, thresh = fbscore(train_df["TARGET"], oof_preds, beta)
+    print ("F-{} score max : {}".format(beta, np.max(fb_lgbm)))
+    test_df["TARGET KNN"] = classifier(sub_preds, fb_lgbm, thresh)
+   
+    return test_df, np.max(fb_lgbm)
+
+
+# In[7]:
+
+
+def Linear(train_df, test_df, num_folds, beta = 1):
+    
+    feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
+
+    train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    train_df.fillna(0, inplace=True)
+    train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+    test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+    
+    temp_test = test_df[feats].copy()
+    temp_test.fillna(0, inplace=True)
+
+    print("Starting Logistic Regression. Train shape: {}, test shape: {}".format(train_df.shape, test_df.shape))
+    
+    # Divide in training/validation and test data
+
+    folds = KFold(n_splits= num_folds, shuffle=True, random_state=1001) #Nbr folds à modifier
+    # Create arrays and dataframes to store results
+    oof_preds = np.zeros(train_df.shape[0])
+    sub_preds = np.zeros(test_df.shape[0])
+
+
+
+    for n_fold, (train_idx, valid_idx) in enumerate(folds.split(train_df[feats], train_df['TARGET'])):
+        train_x, train_y = train_df[feats].iloc[train_idx], train_df['TARGET'].iloc[train_idx]
+        valid_x, valid_y = train_df[feats].iloc[valid_idx], train_df['TARGET'].iloc[valid_idx]
+
+        # LightGBM parameters found by Bayesian optimization
+        over = SMOTE(sampling_strategy=0.2)
+        under = RandomUnderSampler(sampling_strategy = 0.5)
+        clf = LogisticRegression(n_jobs = 6, max_iter = 5000)
+
+        steps = [("over", over), ("under", under), ("model", clf)]
+        pipeline = Pipeline(steps=steps)
+    #     print(np.any(np.isnan(train_df)))
+    #     print(np.all(np.isfinite(train_df)))
+    #     print(np.any(np.isnan(test_df)))
+    #     print(np.all(np.isfinite(test_df)))
+        pipeline.fit(train_x, train_y)
+
+        oof_preds[valid_idx] = pipeline.predict_proba(valid_x)[:, 1]
+        sub_preds += pipeline.predict_proba(temp_test)[:, 1] / folds.n_splits      
+
+        
+        del clf, train_x, train_y, valid_x, valid_y
+        
+    fb_lgbm, thresh = fbscore(train_df["TARGET"], oof_preds, beta)
+    print ("F-{} score max : {}".format(beta, np.max(fb_lgbm)))
+    test_df["TARGET Linear"] = classifier(sub_preds, fb_lgbm, thresh)
+   
+    return test_df, np.max(fb_lgbm)
+
+
+# In[26]:
+
+
+num_rows = 10000 
+df = application_train_test(num_rows)
+
+bureau = bureau_and_balance(num_rows)
+print("Bureau df shape:", bureau.shape)
+df = df.join(bureau, how='left', on='SK_ID_CURR')
+del bureau
+
+
+prev = previous_applications(num_rows)
+print("Previous applications df shape:", prev.shape)
+df = df.join(prev, how='left', on='SK_ID_CURR')
+del prev
+
+
+pos = pos_cash(num_rows)
+print("Pos-cash balance df shape:", pos.shape)
+df = df.join(pos, how='left', on='SK_ID_CURR')
+del pos
+
+
+ins = installments_payments(num_rows)
+print("Installments payments df shape:", ins.shape)
+df = df.join(ins, how='left', on='SK_ID_CURR')
+del ins
+
+
+cc = credit_card_balance(num_rows)
+print("Credit card balance df shape:", cc.shape)
+df = df.join(cc, how='left', on='SK_ID_CURR')
+del cc
+
+
+train_df = df[df['TARGET'].notnull()]
+test_df = df[df['TARGET'].isnull()]
+
+train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+train_df.fillna(0, inplace=True)
+train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+
+del df
+
+f_score=dict()
+
+
+# In[9]:
+
+
+feature_imp_lgbm, test_df, f_score["LGBM"], pred_train = lightgbm(
+    train_df, test_df, num_folds = 6, beta = 0.1, grid_search=False)
+
+
+# In[10]:
+
+
+test_df["TARGET LGBM"].value_counts()
+
+
+# In[ ]:
+
+
+plt.figure()
+plt.pie(test_df["TARGET LGBM"].value_counts(), 
+        labels=test_df["TARGET LGBM"].value_counts().index, 
+        autopct="%.2f")
+plt.title("Credit acceptation repartition", weight="bold")
+
+
+# In[11]:
+
+
+feature_imp_rf, test_df, f_score["RF"] = RF_classifier(train_df, test_df, num_folds = 6, beta = 0.1, grid_search=False)
+
+
+# In[12]:
+
+
+test_df["TARGET RF"].value_counts()
+
+
+# In[13]:
+
+
+test_df, f_score["KNN"] = KNN(train_df, test_df, num_folds = 6, beta = 0.1, grid_search=False)
+
+
+# In[14]:
+
+
+test_df["TARGET KNN"].value_counts()
+
+
+# test_df, f_score["Linear"] = Linear(train_df, test_df, num_folds = 6, beta = 0.1)
+
+# test_df["TARGET Linear"].value_counts()
+
+# In[ ]:
+
+
+shap.initjs()
+explainer = shap.TreeExplainer
+
+
+# In[27]:
+
+
+target = train_df["TARGET"]
+del test_df, train_df
+
+
+# # Resultats
+
+# In[28]:
+
+
+from sklearn.metrics import roc_curve, roc_auc_score
+fpr, tpr, thresh2 = roc_curve(target, pred_train)
+auc = roc_auc_score(target, pred_train)
+
+
+# In[50]:
+
+
+fbres, thresh = fbscore(target, pred_train, 0.1)
+prec, rec, _ = precision_recall_curve(target, pred_train)
+
+
+# In[19]:
+
+
+results = pd.DataFrame()
+results
+
+
+# In[48]:
+
+
+fig, ax1 = plt.subplots()
+lw = 2
+ax1.plot(
+    thresh2,
+    tpr,
+    color="darkorange",
+    lw=lw,
+    label="True positive" % auc,
+)
+ax1.plot(
+    thresh2,
+    fpr,
+    color="green",
+    lw=lw,
+    label="False positive" % auc,
+)
+
+ax1.set_xlabel("Probability")
+ax1.set_ylabel("TP or FP Rate")
+ax1.set_xlim([0,1])
+
+ax2 = ax1.twinx()
+ax2.plot(
+    thresh,
+    fbres,
+    label="f-0.1 score curve")
+ax2.set_ylabel("F-0.1 score")
+
+
+ax1.set_title("TP and FP rate comparison with F-0.1 score")
+fig.legend(loc="right")
+fig.show()
+
+
+# In[17]:
+
+
+plt.figure()
+lw = 2
+plt.plot(
+    fpr,
+    tpr,
+    color="darkorange",
+    lw=lw,
+    label="ROC curve (area = %0.2f)" % auc,
+)
+plt.plot([0, 1], [0, 1], color="navy", lw=lw, linestyle="--")
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("Receiver operating characteristic with LightGBM")
+plt.legend(loc="lower right")
+plt.show()
+
+
+# In[52]:
+
+
+fig, ax1 = plt.subplots()
+lw = 2
+ax1.plot(
+    thresh,
+    prec[:-1],
+    color="darkorange",
+    lw=lw,
+    label="Precision" % auc,
+)
+ax1.plot(
+    thresh,
+    rec[:-1],
+    color="green",
+    lw=lw,
+    label="Recall" % auc,
+)
+
+ax1.set_xlabel("Probability")
+ax1.set_ylabel("Precision or Recall Rate")
+ax1.set_xlim([0,1])
+
+ax2 = ax1.twinx()
+ax2.plot(
+    thresh,
+    fbres,
+    label="f-0.1 score curve")
+ax2.set_ylabel("F-0.1 score")
+
+
+ax1.set_title("Precision and Recall comparison with F-0.1 score")
+fig.legend(loc="right")
+fig.show()
+
+
+# In[56]:
+
+
+display_importances(feature_imp_lgbm)
 
