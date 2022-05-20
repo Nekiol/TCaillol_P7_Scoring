@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# # Tests
+# # Préparation des données
 
-# In[55]:
+# In[1]:
 
 
 # HOME CREDIT DEFAULT RISK COMPETITION
@@ -44,6 +44,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
 import re
+import joblib
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -260,21 +261,72 @@ def credit_card_balance(num_rows = None, nan_as_category = True):
     del cc
     gc.collect()
     return cc_agg
-    
-# Display/plot feature importance
-def display_importances(feature_importance_df_):
-    cols = feature_importance_df_[["feature", "importance"]].groupby("feature").mean().sort_values(by="importance", ascending=False)[:40].index
-    best_features = feature_importance_df_.loc[feature_importance_df_.feature.isin(cols)]
-    plt.figure(figsize=(8, 10))
-    sns.barplot(x="importance", y="feature", data=best_features.sort_values(by="importance", ascending=False))
-    plt.title('LightGBM Features (avg over folds)')
-    plt.tight_layout()
-    plt.savefig('lgbm_importances01.png')
 
 
 # In[2]:
 
 
+num_rows = 10000
+df = application_train_test(num_rows)
+
+bureau = bureau_and_balance(num_rows)
+print("Bureau df shape:", bureau.shape)
+df = df.join(bureau, how='left', on='SK_ID_CURR')
+del bureau
+
+
+prev = previous_applications(num_rows)
+print("Previous applications df shape:", prev.shape)
+df = df.join(prev, how='left', on='SK_ID_CURR')
+del prev
+
+
+pos = pos_cash(num_rows)
+print("Pos-cash balance df shape:", pos.shape)
+df = df.join(pos, how='left', on='SK_ID_CURR')
+del pos
+
+
+ins = installments_payments(num_rows)
+print("Installments payments df shape:", ins.shape)
+df = df.join(ins, how='left', on='SK_ID_CURR')
+del ins
+
+
+cc = credit_card_balance(num_rows)
+print("Credit card balance df shape:", cc.shape)
+df = df.join(cc, how='left', on='SK_ID_CURR')
+del cc
+
+
+train_df = df[df['TARGET'].notnull()]
+test_df = df[df['TARGET'].isnull()]
+
+train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+train_df.fillna(0, inplace=True)
+test_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+test_df.fillna(0, inplace=True)
+train_df = train_df.rename(columns=lambda x: re.sub('[^A-Za-z0-9_]+', '', x))
+test_df = test_df.rename(columns=lambda x: re.sub('[^A-Za-z0-9_]+', '', x))
+
+del df
+
+f_score = dict()
+lim = dict()
+feats = [f for f in train_df.columns if f not in [
+    'TARGET', 'SK_ID_CURR', 'SK_ID_BUREAU', 'SK_ID_PREV', 'index']]
+
+
+test_df.to_pickle("test_df.gz", compression={
+                  'method': 'gzip', 'compresslevel': 1, 'mtime': 1})
+
+
+# # Essais sur les algorithmes
+
+# In[4]:
+
+
+#Permet de produire la courbe du fbeta score
 def fbscore (X, y, beta = 1):
     
     pre, rec, thresh = precision_recall_curve(X, y)
@@ -290,15 +342,18 @@ def fbscore (X, y, beta = 1):
     
     return fb, thresh
 
+# D'après la courbe du fbeta score, classe les éléments dans une ou l'autre catégorie selon la 
+# probabilité correspondant au fbeta score maximal
 def classifier (target, fbtab, thresh):
     lim = thresh[np.argmax(fbtab)]
     tab_class = (target > lim).astype(int)
-    return tab_class
+    return tab_class, lim
 
 
-# In[3]:
+# In[5]:
 
 
+# met en forme les parametres de sortie du grid-search du pipeline pour être compatible avec l'algorithme 
 def best_params(gs):
     dic = gs.best_params_
     a = list(dic.keys())
@@ -309,18 +364,12 @@ def best_params(gs):
     return dic
 
 
-# In[4]:
+# In[33]:
 
 
-def lightgbm(train_df, test_df, num_folds, beta = 1, grid_search = True):
+def lightgbm(num_folds, beta = 1, grid_search = True):
     
-    feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
-
-    train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    train_df.fillna(0, inplace=True)
-    train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-    test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-
+    
     print("Starting LightGBM. Train shape: {}, test shape: {}".format(train_df.shape, test_df.shape))
     
     if grid_search :
@@ -359,7 +408,7 @@ def lightgbm(train_df, test_df, num_folds, beta = 1, grid_search = True):
         valid_x, valid_y = train_df[feats].iloc[valid_idx], train_df['TARGET'].iloc[valid_idx]
 
         # LightGBM parameters found by Bayesian optimization
-        over = SMOTE(sampling_strategy=0.2)
+        over = SMOTE(sampling_strategy=0.3)
         under = RandomUnderSampler(sampling_strategy = 0.5)
         clf = LGBMClassifier(**params)
 
@@ -385,31 +434,22 @@ def lightgbm(train_df, test_df, num_folds, beta = 1, grid_search = True):
         
 
         
-        del clf, train_x, train_y, valid_x, valid_y
+        del clf, train_x, train_y, valid_x, valid_y, pipeline
         
     fb_lgbm, thresh = fbscore(train_df["TARGET"], oof_preds, beta)
     print ("F-{} score max : {}".format(beta, np.max(fb_lgbm)))
-    test_df["TARGET LGBM"] = classifier(sub_preds, fb_lgbm, thresh)
+    test_df["TARGET LGBM"], lim["LGBM"] = classifier(sub_preds, fb_lgbm, thresh)
     test_df["TARGET LGBM score"] = sub_preds
-   
-    return feature_importance_df, test_df, np.max(fb_lgbm), oof_preds
-
-
-# In[5]:
-
-
-def RF_classifier(train_df, test_df, num_folds, beta = 1, grid_search = True):
     
-    feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
+  
+    return feature_importance_df, np.max(fb_lgbm), oof_preds, params
 
-    train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    train_df.fillna(0, inplace=True)
-    train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-    test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+
+# In[7]:
+
+
+def RF_classifier(num_folds, beta = 1, grid_search = True):
     
-    temp_test = test_df[feats].copy()
-    temp_test.fillna(0, inplace=True)
-
     print("Starting Random Forest. Train shape: {}, test shape: {}".format(train_df.shape, test_df.shape))
     
     if grid_search :
@@ -461,7 +501,7 @@ def RF_classifier(train_df, test_df, num_folds, beta = 1, grid_search = True):
         pipeline.fit(train_x, train_y)
 
         oof_preds[valid_idx] = pipeline.predict_proba(valid_x)[:, 1]
-        sub_preds += pipeline.predict_proba(temp_test)[:, 1] / folds.n_splits
+        sub_preds += pipeline.predict_proba(test_df[feats])[:, 1] / folds.n_splits
         
 
 
@@ -473,30 +513,20 @@ def RF_classifier(train_df, test_df, num_folds, beta = 1, grid_search = True):
         
 
         
-        del clf, train_x, train_y, valid_x, valid_y
+        del clf, pipeline, train_x, train_y, valid_x, valid_y
         
     fb_lgbm, thresh = fbscore(train_df["TARGET"], oof_preds, beta)
     print ("F-{} score max : {}".format(beta, np.max(fb_lgbm)))
-    test_df["TARGET RF"] = classifier(sub_preds, fb_lgbm, thresh)
+    test_df["TARGET RF"], lim["RF"] = classifier(sub_preds, fb_lgbm, thresh)
    
-    return feature_importance_df, test_df, np.max(fb_lgbm)
+    return feature_importance_df, np.max(fb_lgbm)
 
 
-# In[6]:
+# In[13]:
 
 
-def KNN(train_df, test_df, num_folds, beta = 1, grid_search = True):
+def KNN(num_folds, beta = 1, grid_search = False):
     
-    feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
-
-    train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    train_df.fillna(0, inplace=True)
-    train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-    test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-    
-    temp_test = test_df[feats].copy()
-    temp_test.fillna(0, inplace=True)
-
     print("Starting KNN. Train shape: {}, test shape: {}".format(train_df.shape, test_df.shape))
     
     if grid_search :
@@ -535,7 +565,7 @@ def KNN(train_df, test_df, num_folds, beta = 1, grid_search = True):
         valid_x, valid_y = train_df[feats].iloc[valid_idx], train_df['TARGET'].iloc[valid_idx]
 
         # LightGBM parameters found by Bayesian optimization
-        over = SMOTE(sampling_strategy=0.2)
+        over = SMOTE(sampling_strategy=0.1)
         under = RandomUnderSampler(sampling_strategy = 0.5)
         clf = KNeighborsClassifier(**params)
 
@@ -548,33 +578,23 @@ def KNN(train_df, test_df, num_folds, beta = 1, grid_search = True):
         pipeline.fit(train_x, train_y)
 
         oof_preds[valid_idx] = pipeline.predict_proba(valid_x)[:, 1]
-        sub_preds += pipeline.predict_proba(temp_test)[:, 1] / folds.n_splits      
+        sub_preds += pipeline.predict_proba(test_df[feats])[:, 1] / folds.n_splits      
 
         
-        del clf, train_x, train_y, valid_x, valid_y
+        del clf, train_x, train_y, valid_x, valid_y, pipeline
         
     fb_lgbm, thresh = fbscore(train_df["TARGET"], oof_preds, beta)
     print ("F-{} score max : {}".format(beta, np.max(fb_lgbm)))
-    test_df["TARGET KNN"] = classifier(sub_preds, fb_lgbm, thresh)
+    test_df["TARGET KNN"], lim["KNN"] = classifier(sub_preds, fb_lgbm, thresh)
    
-    return test_df, np.max(fb_lgbm)
+    return np.max(fb_lgbm)
 
 
-# In[7]:
+# In[29]:
 
 
-def Linear(train_df, test_df, num_folds, beta = 1):
+def Linear(num_folds, beta = 1):
     
-    feats = [f for f in train_df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
-
-    train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    train_df.fillna(0, inplace=True)
-    train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-    test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-    
-    temp_test = test_df[feats].copy()
-    temp_test.fillna(0, inplace=True)
-
     print("Starting Logistic Regression. Train shape: {}, test shape: {}".format(train_df.shape, test_df.shape))
     
     # Divide in training/validation and test data
@@ -604,81 +624,32 @@ def Linear(train_df, test_df, num_folds, beta = 1):
         pipeline.fit(train_x, train_y)
 
         oof_preds[valid_idx] = pipeline.predict_proba(valid_x)[:, 1]
-        sub_preds += pipeline.predict_proba(temp_test)[:, 1] / folds.n_splits      
+        sub_preds += pipeline.predict_proba(test_df[feats])[:, 1] / folds.n_splits      
 
         
-        del clf, train_x, train_y, valid_x, valid_y
+        del clf, train_x, train_y, valid_x, valid_y, pipeline
         
     fb_lgbm, thresh = fbscore(train_df["TARGET"], oof_preds, beta)
     print ("F-{} score max : {}".format(beta, np.max(fb_lgbm)))
-    test_df["TARGET Linear"] = classifier(sub_preds, fb_lgbm, thresh)
+    test_df["TARGET Linear"], lim["Linear"] = classifier(sub_preds, fb_lgbm, thresh)
    
-    return test_df, np.max(fb_lgbm)
+    return np.max(fb_lgbm)
 
 
-# In[26]:
+# In[41]:
 
 
-num_rows = 10000 
-df = application_train_test(num_rows)
-
-bureau = bureau_and_balance(num_rows)
-print("Bureau df shape:", bureau.shape)
-df = df.join(bureau, how='left', on='SK_ID_CURR')
-del bureau
+feature_imp_lgbm, f_score["LGBM"], pred_train, params_lgbm = lightgbm(
+    num_folds = 6, beta = 0.1, grid_search=False)
 
 
-prev = previous_applications(num_rows)
-print("Previous applications df shape:", prev.shape)
-df = df.join(prev, how='left', on='SK_ID_CURR')
-del prev
-
-
-pos = pos_cash(num_rows)
-print("Pos-cash balance df shape:", pos.shape)
-df = df.join(pos, how='left', on='SK_ID_CURR')
-del pos
-
-
-ins = installments_payments(num_rows)
-print("Installments payments df shape:", ins.shape)
-df = df.join(ins, how='left', on='SK_ID_CURR')
-del ins
-
-
-cc = credit_card_balance(num_rows)
-print("Credit card balance df shape:", cc.shape)
-df = df.join(cc, how='left', on='SK_ID_CURR')
-del cc
-
-
-train_df = df[df['TARGET'].notnull()]
-test_df = df[df['TARGET'].isnull()]
-
-train_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-train_df.fillna(0, inplace=True)
-train_df = train_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-test_df = test_df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
-
-del df
-
-f_score=dict()
-
-
-# In[9]:
-
-
-feature_imp_lgbm, test_df, f_score["LGBM"], pred_train = lightgbm(
-    train_df, test_df, num_folds = 6, beta = 0.1, grid_search=False)
-
-
-# In[10]:
+# In[42]:
 
 
 test_df["TARGET LGBM"].value_counts()
 
 
-# In[ ]:
+# In[43]:
 
 
 plt.figure()
@@ -688,73 +659,74 @@ plt.pie(test_df["TARGET LGBM"].value_counts(),
 plt.title("Credit acceptation repartition", weight="bold")
 
 
-# In[11]:
+# In[58]:
 
 
-feature_imp_rf, test_df, f_score["RF"] = RF_classifier(train_df, test_df, num_folds = 6, beta = 0.1, grid_search=False)
+feature_imp_rf, f_score["RF"] = RF_classifier(num_folds = 6, beta = 0.1, grid_search=False)
 
 
-# In[12]:
+# In[59]:
 
 
 test_df["TARGET RF"].value_counts()
 
 
-# In[13]:
+# In[60]:
 
 
-test_df, f_score["KNN"] = KNN(train_df, test_df, num_folds = 6, beta = 0.1, grid_search=False)
+f_score["KNN"] = KNN(num_folds = 6, beta = 0.1, grid_search=False)
 
 
-# In[14]:
+# In[61]:
 
 
 test_df["TARGET KNN"].value_counts()
 
 
-# test_df, f_score["Linear"] = Linear(train_df, test_df, num_folds = 6, beta = 0.1)
-
-# test_df["TARGET Linear"].value_counts()
-
-# In[ ]:
+# In[39]:
 
 
-shap.initjs()
-explainer = shap.TreeExplainer
+f_score["Linear"] = Linear(num_folds = 6, beta = 0.1)
 
 
-# In[27]:
+# In[40]:
 
 
-target = train_df["TARGET"]
-del test_df, train_df
+test_df["TARGET Linear"].value_counts()
 
 
-# # Resultats
+# # Resultats et préparation à l'API
 
-# In[28]:
+# In[67]:
+
+
+plt.bar(f_score.keys(), f_score.values())
+plt.title("fbeta score selon l'algorithme")
+
+
+# In[35]:
 
 
 from sklearn.metrics import roc_curve, roc_auc_score
-fpr, tpr, thresh2 = roc_curve(target, pred_train)
-auc = roc_auc_score(target, pred_train)
+fpr, tpr, thresh2 = roc_curve(train_df["TARGET"], pred_train)
+auc = roc_auc_score(train_df["TARGET"], pred_train)
 
 
-# In[50]:
+# In[36]:
 
 
-fbres, thresh = fbscore(target, pred_train, 0.1)
-prec, rec, _ = precision_recall_curve(target, pred_train)
+fbres, thresh = fbscore(train_df["TARGET"], pred_train, 0.1)
+prec, rec, _ = precision_recall_curve(train_df["TARGET"], pred_train)
 
 
-# In[19]:
+# In[37]:
 
 
 results = pd.DataFrame()
 results
 
 
-# In[48]:
+# In[38]:
 
 
 fig, ax1 = plt.subplots()
@@ -791,7 +763,7 @@ fig.legend(loc="right")
 fig.show()
 
 
-# In[17]:
+# In[39]:
 
 
 plt.figure()
@@ -813,7 +785,7 @@ plt.legend(loc="lower right")
 plt.show()
 
 
-# In[52]:
+# In[40]:
 
 
 fig, ax1 = plt.subplots()
@@ -850,8 +822,94 @@ fig.legend(loc="right")
 fig.show()
 
 
-# In[56]:
+# In[86]:
 
 
-display_importances(feature_imp_lgbm)
+over = SMOTE(sampling_strategy=0.2)
+under = RandomUnderSampler(sampling_strategy = 0.5)
+clf = LGBMClassifier(**params_lgbm)
+
+steps = [("over", over), ("under", under), ("model", clf)]
+pipeline = Pipeline(steps=steps)
+
+pipeline.fit(train_df[feats], train_df["TARGET"])
+
+
+
+joblib.dump(pipeline, 'pipeline_housing.joblib')
+
+
+# In[87]:
+
+
+import shap
+shap.initjs()
+
+explainer = shap.TreeExplainer(clf)
+joblib.dump(explainer, "shap_explainer.joblib")
+
+
+# In[100]:
+
+
+shap_values = explainer.shap_values(test_df[feats])
+
+
+# In[103]:
+
+
+shap.summary_plot(shap_values[1], test_df[feats], plot_type='bar')
+
+
+# In[44]:
+
+
+lim
+
+
+# In[68]:
+
+
+num_rows = None
+df = application_train_test(num_rows)
+
+bureau = bureau_and_balance(num_rows)
+print("Bureau df shape:", bureau.shape)
+df = df.join(bureau, how='left', on='SK_ID_CURR')
+del bureau
+
+
+prev = previous_applications(num_rows)
+print("Previous applications df shape:", prev.shape)
+df = df.join(prev, how='left', on='SK_ID_CURR')
+del prev
+
+
+pos = pos_cash(num_rows)
+print("Pos-cash balance df shape:", pos.shape)
+df = df.join(pos, how='left', on='SK_ID_CURR')
+del pos
+
+
+ins = installments_payments(num_rows)
+print("Installments payments df shape:", ins.shape)
+df = df.join(ins, how='left', on='SK_ID_CURR')
+del ins
+
+
+cc = credit_card_balance(num_rows)
+print("Credit card balance df shape:", cc.shape)
+df = df.join(cc, how='left', on='SK_ID_CURR')
+del cc
+
+
+df.replace([np.inf, -np.inf], np.nan, inplace=True)
+df.fillna(0, inplace=True)
+df = df.rename(columns = lambda x:re.sub('[^A-Za-z0-9_]+', '', x))
+
+df.to_pickle("df.gz", compression={'method': 'gzip', 'compresslevel': 1, 'mtime': 1})
+del df
+
+
+
 
