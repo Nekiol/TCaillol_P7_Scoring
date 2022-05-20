@@ -4,28 +4,13 @@ from dash.dependencies import Input, Output, State
 import joblib
 import plotly.graph_objects as go
 import pandas as pd
-# import shap
+import requests
 import plotly.express as px
 import numpy as np
 
 
 external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
-
-df = pd.read_pickle("test_df.gz")
-df.drop(columns=["index"], inplace=True)
-df.set_index("SK_ID_CURR", inplace=True)
-feats = [f for f in df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
-
-#Partie eventuellement à sortir dans l'API à part
-model = joblib.load("pipeline_housing.joblib")
-
-explainer = joblib.load("shap_explainer.joblib")
-
-def make_prediction():
-    return 
-
-# A modifier
-score_min = 0.2*100
+feats = requests.get("http://127.0.0.1:5000/feats/").json()
 
 app = Dash(__name__, external_stylesheets=external_stylesheets)
 
@@ -42,7 +27,7 @@ app.layout = html.Div([
         style={'width': '66%', 'display': 'inline-block'}),
         
         html.Div([
-            dcc.Input(id="client_id", type="number", value=df.index.values[0]),
+            dcc.Input(id="client_id", type="number", value='100001'),
             html.Button(id="validation_bt", n_clicks=0, children="Valider")
         ],
         style={'width': '33%', "float" : "right", 'display': 'inline-block'})
@@ -62,11 +47,12 @@ app.layout = html.Div([
               Input('validation_bt', 'n_clicks'),
               State('client_id', 'value'))
 def update_score(n_clicks, client_id):
-    dff = df.loc[client_id]
 
-    dff_feats = dff[feats].to_numpy().reshape(1,-1)
+    score_min = requests.get("http://127.0.0.1:5000/score_min/").json()["score_min"] * 100
         
-    val = model.predict_proba(dff_feats)[0, 1] * 100
+    r = requests.get("http://127.0.0.1:5000/predict", params={"client_id" : client_id})
+    val = r.json()["proba"] * 100
+    
     if val > score_min:
         accept = "Accepté"
         color = "darkgreen"
@@ -105,11 +91,7 @@ def update_score(n_clicks, client_id):
               Input('validation_bt', 'n_clicks'),
               State('client_id', 'value'))
 def update_fi(n_clicks, client_id):
-    dff = df.loc[client_id]
-    dff_feats = dff[feats].to_numpy().reshape(1,-1)
-    
-    shap_vals = explainer.shap_values(dff_feats)
-    shap_vals = shap_vals[1][0][:] #1 pour le résultat positif au crédit, 0 parce que voilà, et toutes les features
+    shap_vals = requests.get("http://127.0.0.1:5000/importances", params={"client_id" : client_id}).json()
     
     df_feats = pd.DataFrame(shap_vals, columns=["importances"])
     df_feats["feats"] = feats
@@ -142,12 +124,13 @@ def change_feat(clickdata):
               Input("crossfilter-feature", "value"),
               State('client_id', 'value'))
 def plot_bar(n_clicks, feature, client_id):
-    dff = df[feature]
-    
+    results = requests.get("http://127.0.0.1:5000/bar", 
+                            params={"client_id" : client_id, "feature" : feature}).json()                      
+        
     fig3 = px.bar(
            x = ["client", "moyenne"],
-           y = [dff.loc[client_id], np.mean(dff)],
-           color = [dff.loc[client_id], np.mean(dff)],
+           y = [results[0], results[1]],
+           color = [results[0], results[1]],
            title = "Comparaison du client à la moyenne")
     fig3.update_xaxes(title="")
     fig3.update_yaxes(title="Valeur")
@@ -157,7 +140,8 @@ def plot_bar(n_clicks, feature, client_id):
 @app.callback(Output('boxplot', 'figure'),
               Input("crossfilter-feature", "value"))
 def plot_box(feature):
-    dff = df[feature]
+    dff = requests.get("http://127.0.0.1:5000/boxplot", 
+                            params={"feature" : feature}).json()  
     
     fig4 = px.box(dff, title = "Répartition de la variable dans la clientèle")
     fig4.update_xaxes(title="")
