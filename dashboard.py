@@ -10,7 +10,7 @@ import numpy as np
 
 
 external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
-feats = requests.get("http://127.0.0.1:5000/feats/").json()
+feats = requests.get("http://127.0.0.1:80/feats/").json()
 
 app = Dash(__name__, external_stylesheets=external_stylesheets)
 
@@ -48,9 +48,9 @@ app.layout = html.Div([
               State('client_id', 'value'))
 def update_score(n_clicks, client_id):
 
-    score_min = requests.get("http://127.0.0.1:5000/score_min/").json()["score_min"] * 100
+    score_min = requests.get("http://127.0.0.1:80/score_min/").json()["score_min"] * 100
         
-    r = requests.get("http://127.0.0.1:5000/predict", params={"client_id" : client_id})
+    r = requests.get("http://127.0.0.1:80/predict", params={"client_id" : client_id})
     val = r.json()["proba"] * 100
     
     if val > score_min:
@@ -91,7 +91,7 @@ def update_score(n_clicks, client_id):
               Input('validation_bt', 'n_clicks'),
               State('client_id', 'value'))
 def update_fi(n_clicks, client_id):
-    shap_vals = requests.get("http://127.0.0.1:5000/importances", params={"client_id" : client_id}).json()
+    shap_vals = requests.get("http://127.0.0.1:80/importances", params={"client_id" : client_id}).json()
     
     df_feats = pd.DataFrame(shap_vals, columns=["importances"])
     df_feats["feats"] = feats
@@ -124,7 +124,7 @@ def change_feat(clickdata):
               Input("crossfilter-feature", "value"),
               State('client_id', 'value'))
 def plot_bar(n_clicks, feature, client_id):
-    results = requests.get("http://127.0.0.1:5000/bar", 
+    results = requests.get("http://127.0.0.1:80/bar", 
                             params={"client_id" : client_id, "feature" : feature}).json()                      
         
     fig3 = px.bar(
@@ -140,7 +140,7 @@ def plot_bar(n_clicks, feature, client_id):
 @app.callback(Output('boxplot', 'figure'),
               Input("crossfilter-feature", "value"))
 def plot_box(feature):
-    dff = requests.get("http://127.0.0.1:5000/boxplot", 
+    dff = requests.get("http://127.0.0.1:80/boxplot", 
                             params={"feature" : feature}).json()  
     
     fig4 = px.box(dff, title = "Répartition de la variable dans la clientèle")

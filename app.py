@@ -10,10 +10,10 @@ app = flask.Flask(__name__)
 app.config["DEBUG"] = False
 
 #Chargement du tableau et du modèle
-df = pd.read_pickle("test_df.gz")
+df = pd.read_pickle("df.gz")
 df.drop(columns=["index"], inplace=True)
 df.set_index("SK_ID_CURR", inplace=True)
-feats = [f for f in df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
+feats = np.genfromtxt('feats.csv', dtype='unicode', delimiter=',')
 
 model = joblib.load("pipeline_housing.joblib")
 
@@ -48,7 +48,7 @@ def proba():
 
 @app.route('/feats/', methods=["GET"])
 def feats_ret():
-    return json.dumps(feats) 
+    return json.dumps(feats.tolist()) 
 
 @app.route('/importances', methods=["GET"])
 def importances():
@@ -85,4 +85,5 @@ def boxplot():
     else:
         return "Error"   
  
-app.run()
+if __name__ == "__main__":
+    app.run(port=80)
